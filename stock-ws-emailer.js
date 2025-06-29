@@ -19,8 +19,12 @@ if (!EMAIL_USER || !EMAIL_PASS) {
 }
 
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false,
   auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+  logger: true,
+  debug: true
 });
 
 let latestStockDataJSON = null;
@@ -52,12 +56,12 @@ async function fetchItemInfo(attempt = 1, maxAttempts = 3) {
     if (!Array.isArray(itemInfo)) {
       throw new Error('Item info is not an array');
     }
-    itemInfo = itemInfo.filter(item => item.item_id); // Filter out items with undefined item_id
+    itemInfo = itemInfo.filter(item => item.item_id);
     broadcastLog(`Fetched item info: ${itemInfo.length} items`);
   } catch (err) {
     broadcastLog(`Error fetching item info: ${err.toString()}`);
     if (attempt < maxAttempts) {
-      const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+      const delay = Math.pow(2, attempt) * 1000;
       broadcastLog(`Retrying item info fetch in ${delay/1000} seconds...`);
       setTimeout(() => fetchItemInfo(attempt + 1, maxAttempts), delay);
     } else {
@@ -110,8 +114,22 @@ function sendVerificationEmail(email) {
   transporter.sendMail(mailOptions, (error, info) => {
     if (error) {
       broadcastLog(`Error sending verification email to ${email}: ${error.toString()}`);
+      if (error.code === 'EAUTH') {
+        broadcastLog('Authentication failed. Check EMAIL_USER and EMAIL_PASS, or use an App Password for Gmail.');
+      } else if (error.code === 'EENVELOPE') {
+        broadcastLog('Invalid email address or SMTP server issue.');
+      }
     } else {
       broadcastLog(`Verification email sent to ${email}: ${info.response}`);
+    }
+  });
+
+  // Verify transporter configuration
+  transporter.verify((error, success) => {
+    if (error) {
+      broadcastLog(`SMTP configuration error: ${error.toString()}`);
+    } else {
+      broadcastLog('SMTP configuration verified successfully');
     }
   });
 }
@@ -180,6 +198,9 @@ function sendEmail(subject, htmlBody, recipientEmail) {
   transporter.sendMail(mailOptions, (error, info) => {
     if (error) {
       broadcastLog(`Error sending email to ${recipientEmail}: ${error.toString()}`);
+      if (error.code === 'EAUTH') {
+        broadcastLog('Authentication failed. Check EMAIL_USER and EMAIL_PASS, or use an App Password for Gmail.');
+      }
     } else {
       broadcastLog(`Email sent to ${recipientEmail}: ${info.response}`);
     }
@@ -276,7 +297,7 @@ async function pollWeatherAPI(attempt = 1, maxAttempts = 3) {
   } catch (err) {
     broadcastLog(`Error polling Weather API: ${err.toString()}`);
     if (attempt < maxAttempts) {
-      const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+      const delay = Math.pow(2, attempt) * 1000;
       broadcastLog(`Retrying weather fetch in ${delay/1000} seconds...`);
       setTimeout(() => pollWeatherAPI(attempt + 1, maxAttempts), delay);
     } else {
@@ -439,7 +460,7 @@ app.get('/', (req, res) => {
     const errorMessage = document.getElementById('error-message');
 
     socket.on('log', msg => {
-      terminal.textContent += msg + '\n';
+      terminal.textContent += msg + '\\n';
       terminal.scrollTop = terminal.scrollHeight;
     });
 
@@ -534,6 +555,10 @@ app.get('/unsub', (req, res) => {
   }
 });
 
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', uptime: process.uptime() });
+});
+
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  broadcastLog(`Server running on port ${PORT}`);
 });
