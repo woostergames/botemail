@@ -459,7 +459,7 @@ app.get('/test', (req, res) => {
       });
     }
   }
-  res.send('Test emails were sent for selected items.');
+  res.send('Test emails were sent for selected spam items.');
 });
 
 server.listen(PORT, () => {
