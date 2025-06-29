@@ -40,13 +40,30 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.urlencoded({ extended: true }));
 
-async function fetchItemInfo() {
+async function fetchItemInfo(attempt = 1, maxAttempts = 3) {
   try {
+    broadcastLog(`Fetching item info (Attempt ${attempt}/${maxAttempts})...`);
     const response = await fetch(itemInfoURL);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP error! Status: ${response.status}, Message: ${errorText}`);
+    }
     itemInfo = await response.json();
-    broadcastLog('Fetched item info from API.');
+    if (!Array.isArray(itemInfo)) {
+      throw new Error('Item info is not an array');
+    }
+    itemInfo = itemInfo.filter(item => item.item_id); // Filter out items with undefined item_id
+    broadcastLog(`Fetched item info: ${itemInfo.length} items`);
   } catch (err) {
     broadcastLog(`Error fetching item info: ${err.toString()}`);
+    if (attempt < maxAttempts) {
+      const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+      broadcastLog(`Retrying item info fetch in ${delay/1000} seconds...`);
+      setTimeout(() => fetchItemInfo(attempt + 1, maxAttempts), delay);
+    } else {
+      broadcastLog('Max retries reached for item info. Proceeding without item info.');
+      itemInfo = [];
+    }
   }
 }
 
@@ -107,23 +124,27 @@ function buildStockHtmlEmail(data, recipientEmail) {
   let hasItems = false;
 
   const allStockItems = [];
-  ['seed_stock', 'gear_stock', 'egg_stock', 'cosmetic_stock', 'event_stock'].forEach(category => {
+  ['seed_stock', 'gear_stock', 'egg_stock', 'cosmetic_stock', 'eventshop_stock'].forEach(category => {
     if (Array.isArray(data[category])) {
-      allStockItems.push(...data[category]);
+      allStockItems.push(...data[category].filter(item => item.item_id));
     }
   });
 
-  const inStockItems = allStockItems.filter(item => userSelections.has(item.item_id) && item. quantity > 0);
+  const inStockItems = allStockItems.filter(item => userSelections.has(item.item_id) && item.quantity > 0);
 
   if (inStockItems.length > 0) {
     hasItems = true;
     html += `<table style="border-collapse: collapse; width: 100%; max-width: 600px;">`;
     html += `<thead><tr><th style="border: 1px solid #ddd; padding: 8px;">Icon</th><th style="border: 1px solid #ddd; padding: 8px;">Item</th><th style="border: 1px solid #ddd; padding: 8px;">Quantity</th></tr></thead><tbody>`;
     inStockItems.forEach(item => {
+      if (!item.item_id) {
+        broadcastLog(`Skipping item with undefined item_id in stock email: ${JSON.stringify(item)}`);
+        return;
+      }
       const name = item.display_name || item.item_id || 'Unknown';
       const qty = item.quantity || 0;
-      const iconUrl = `https://image.joshlei.com/${item.item_id}.png`;
-      html += `<tr><td style="border: 1px solid #ddd; padding: 8px; text-align: center;">< especies><img src="${iconUrl}" alt="${name}" style="width: 32px; height: 32px; object-fit: contain;"></td><td style="border: 1px solid #ddd; padding: 8px;">${name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${qty}</td></tr>`;
+      const iconUrl = itemInfo.find(info => info.item_id === item.item_id)?.icon || `https://api.joshlei.com/v2/growagarden/image/${item.item_id}`;
+      html += `<tr><td style="border: 1px solid #ddd; padding: 8px; text-align: center;"><img src="${iconUrl}" alt="${name}" style="width: 32px; height: 32px; object-fit: contain;" onerror="this.src='https://api.joshlei.com/v2/growagarden/image/placeholder';"></td><td style="border: 1px solid #ddd; padding: 8px;">${name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${qty}</td></tr>`;
     });
     html += `</tbody></table><br/>`;
   }
@@ -144,7 +165,7 @@ function buildWeatherHtmlEmail(weatherEvent, discordInvite, recipientEmail) {
     html += `<p><strong>Join the Community:</strong> <a href="${discordInvite}">Discord Invite</a></p>`;
   }
   html += `<p>New weather event detected in Grow A Garden!</p>`;
-  html += `<p style="font-size: 12px; color: #666;"><a href="https://botemail-yco2.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</ 0}`;
+  html += `<p style="font-size: 12px; color: #666;"><a href="https://botemail-yco2.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</a></p>`;
   return html;
 }
 
@@ -178,8 +199,21 @@ function connectWebSocket() {
       const newData = JSON.parse(data);
       const newDataJSON = JSON.stringify(newData);
 
+      // Filter out invalid items
+      for (const category of ['seed_stock', 'gear_stock', 'egg_stock', 'cosmetic_stock', 'eventshop_stock']) {
+        if (Array.isArray(newData[category])) {
+          newData[category] = newData[category].filter(item => {
+            if (!item.item_id) {
+              broadcastLog(`Skipping invalid item in ${category} with undefined item_id: ${JSON.stringify(item)}`);
+              return false;
+            }
+            return true;
+          });
+        }
+      }
+
       if (hasDataChanged(latestStockDataJSON, newDataJSON)) {
-        broadcastLog('Stock data changed — checking subscriber selections...');
+        broadcastLog(`Stock data changed — checking subscriber selections. Data: ${newDataJSON}`);
         latestStockDataJSON = newDataJSON;
         latestStockDataObj = newData;
         subscriptions.forEach((selections, email) => {
@@ -206,9 +240,14 @@ function connectWebSocket() {
   });
 }
 
-async function pollWeatherAPI() {
+async function pollWeatherAPI(attempt = 1, maxAttempts = 3) {
   try {
+    broadcastLog(`Polling Weather API (Attempt ${attempt}/${maxAttempts})...`);
     const response = await fetch(weatherURL);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP error! Status: ${response.status}, Message: ${errorText}`);
+    }
     const data = await response.json();
     const newDataJSON = JSON.stringify(data);
 
@@ -236,6 +275,13 @@ async function pollWeatherAPI() {
     }
   } catch (err) {
     broadcastLog(`Error polling Weather API: ${err.toString()}`);
+    if (attempt < maxAttempts) {
+      const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+      broadcastLog(`Retrying weather fetch in ${delay/1000} seconds...`);
+      setTimeout(() => pollWeatherAPI(attempt + 1, maxAttempts), delay);
+    } else {
+      broadcastLog('Max retries reached for weather API.');
+    }
   }
 }
 
@@ -365,7 +411,7 @@ app.get('/', (req, res) => {
 
   <div id="subscribe-popup" class="popup">
     <div class="popup-content">
-      <h2>Item Selection</h2>
+      <h2>Select Items for Stock Alerts</h2>
       <form id="item-selection-form" action="/subscribe" method="POST">
         <input type="hidden" name="email" id="popup-email">
         <div id="items-section">
