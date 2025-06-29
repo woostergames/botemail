@@ -3,6 +3,7 @@ const http = require('http');
 const nodemailer = require('nodemailer');
 const { Server } = require('socket.io');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const crypto = require('crypto');
 
 const stockURL = 'https://api.joshlei.com/v2/growagarden/stock';
 const weatherURL = 'https://api.joshlei.com/v2/growagarden/weather';
@@ -27,8 +28,9 @@ let latestWeatherDataJSON = null;
 let latestWeatherDataObj = null;
 let itemInfo = null;
 
-// Store subscriptions with selected items
-const subscriptions = new Map(); // Map<email, { seeds: Set<item_id>, gear: Set<item_id> }>
+// Store pending verifications and subscriptions
+const pendingVerifications = new Map(); // Map<email, { token: string, timestamp: number }>
+const subscriptions = new Map(); // Map<email, Set<item_id>>
 
 const app = express();
 const server = http.createServer(app);
@@ -62,24 +64,61 @@ function hasDataChanged(oldJSON, newJSON) {
   return oldJSON !== newJSON;
 }
 
+function generateVerificationToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function buildVerificationEmail(email, token) {
+  const verificationUrl = `http://botemail-wrdo.onrender.com/verify?email=${encodeURIComponent(email)}&token=${token}`;
+  return `
+    <h2>Grow A Garden Subscription Verification</h2>
+    <p>Please verify your email address to subscribe to Grow A Garden updates.</p>
+    <p><a href="${verificationUrl}" style="padding: 10px 20px; background: #6a9955; color: #fff; text-decoration: none; border-radius: 5px;">Verify and Subscribe</a></p>
+    <p>If you did not request this, please ignore this email.</p>
+    <p style="font-size: 12px; color: #666;">This link will expire in 24 hours.</p>
+  `;
+}
+
+function sendVerificationEmail(email) {
+  const token = generateVerificationToken();
+  const timestamp = Date.now();
+  pendingVerifications.set(email, { token, timestamp });
+
+  const mailOptions = {
+    from: `"Grow A Garden Bot" <${EMAIL_USER}>`,
+    to: email,
+    subject: '🌱 Verify Your Grow A Garden Subscription',
+    html: buildVerificationEmail(email, token),
+  };
+
+  transporter.sendMail(mailOptions, (error, info) => {
+    if (error) {
+      broadcastLog(`Error sending verification email to ${email}: ${error.toString()}`);
+    } else {
+      broadcastLog(`Verification email sent to ${email}: ${info.response}`);
+    }
+  });
+}
+
 function buildStockHtmlEmail(data, recipientEmail) {
   const userSelections = subscriptions.get(recipientEmail);
   if (!userSelections) return null;
 
   let html = `<h2>Grow A Garden Stock Update</h2>`;
-  const allowedCategories = ['seed_stock', 'gear_stock'];
   let hasItems = false;
 
-  for (const category of allowedCategories) {
-    if (!Array.isArray(data[category])) continue;
-    const isSeeds = category === 'seed_stock';
-    const selectedItems = isSeeds ? userSelections.seeds : userSelections.gear;
-    const inStockItems = data[category].filter(item => selectedItems.has(item.item_id) && item.quantity > 0);
+  // Aggregate all stock items from API
+  const allStockItems = [];
+  ['seed_stock', 'gear_stock', 'egg_stock', 'cosmetic_stock', 'event_stock'].forEach(category => {
+    if (Array.isArray(data[category])) {
+      allStockItems.push(...data[category]);
+    }
+  });
 
-    if (inStockItems.length === 0) continue;
+  const inStockItems = allStockItems.filter(item => userSelections.has(item.item_id) && item.quantity > 0);
 
+  if (inStockItems.length > 0) {
     hasItems = true;
-    html += `<h3 style="color:#2f4f2f; text-transform: capitalize; border-bottom: 2px solid #6a9955;">${category.replace(/_/g, ' ')}</h3>`;
     html += `<table style="border-collapse: collapse; width: 100%; max-width: 600px;">`;
     html += `<thead><tr><th style="border: 1px solid #ddd; padding: 8px;">Icon</th><th style="border: 1px solid #ddd; padding: 8px;">Item</th><th style="border: 1px solid #ddd; padding: 8px;">Quantity</th></tr></thead><tbody>`;
     inStockItems.forEach(item => {
@@ -190,14 +229,19 @@ setInterval(pollWeatherAPI, 15000);
 pollStockAPI();
 pollWeatherAPI();
 
-app.get('/', (req, res) => {
-  // Categorize items into seeds and gear based on item-info API
-  const seedItems = itemInfo ? itemInfo.filter(item => 
-    ['Common', 'Uncommon', 'Rare', 'Legendary', 'Mythical', 'Divine', 'Prismatic'].includes(item.rarity) &&
-    !['sprinkler', 'tool', 'crate', 'sign', 'fence', 'pillar', 'statue', 'bench', 'table', 'arbour', 'canopy', 'flooring', 'lantern', 'pottery', 'umbrella', 'walkway', 'torch', 'flag', 'well', 'gnome', 'scarecrow', 'trough', 'barrel', 'fountain', 'painting', 'podium', 'rug', 'mailbox', 'gate', 'chime', 'trowel', 'shovel', 'rake', 'wheelbarrow', 'compost', 'cooking', 'clothesline', 'bird', 'log', 'rock', 'hay', 'brick', 'seesaw', 'swing', 'trampoline', 'roundabout', 'lamp', 'tv', 'lightning', 'radar', 'staff'].some(keyword => item.display_name.toLowerCase().includes(keyword))
-  ) : [];
-  const gearItems = itemInfo ? itemInfo.filter(item => !seedItems.includes(item)) : [];
+// Clean up expired verification tokens (older than 24 hours)
+setInterval(() => {
+  const now = Date.now();
+  const expirationTime = 24 * 60 * 60 * 1000; // 24 hours
+  for (const [email, { timestamp }] of pendingVerifications) {
+    if (now - timestamp > expirationTime) {
+      pendingVerifications.delete(email);
+      broadcastLog(`Removed expired verification token for ${email}`);
+    }
+  }
+}, 60 * 60 * 1000); // Run every hour
 
+app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
 <html>
@@ -278,14 +322,6 @@ app.get('/', (req, res) => {
     .popup-content button:hover {
       background: #4a7a3a;
     }
-    .popup-content select {
-      width: 100%;
-      padding: 0.5rem;
-      background: #333;
-      color: #d4d4d4;
-      border: 1px solid #6a9955;
-      margin-bottom: 1rem;
-    }
     .item-list {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -319,26 +355,17 @@ app.get('/', (req, res) => {
       <h2>Select Items for Stock Alerts</h2>
       <form id="item-selection-form" action="/subscribe" method="POST">
         <input type="hidden" name="email" id="popup-email">
-        <div id="seeds-section">
-          <h3>Seeds</h3>
+        <div id="items-section">
+          <h3>Items</h3>
           <div class="item-list">
-            ${seedItems.map(item => `
-              <label><input type="checkbox" name="seeds" value="${item.item_id}"> ${item.display_name}</label>
-            `).join('')}
+            ${itemInfo ? itemInfo.map(item => `
+              <label><input type="checkbox" name="items" value="${item.item_id}"> ${item.display_name}</label>
+            `).join('') : '<p>Loading items...</p>'}
           </div>
         </div>
-        <button type="button" onclick="showGear()">Save and Continue</button>
-      </form>
-      <div id="gear-section" style="display:none;">
-        <h3>Gear</h3>
-        <div class="item-list">
-          ${gearItems.map(item => `
-            <label><input type="checkbox" name="gear" value="${item.item_id}"> ${item.display_name}</label>
-          `).join('')}
-        </div>
-        <button type="submit" form="item-selection-form">Subscribe</button>
+        <button type="submit">Subscribe</button>
         <p id="error-message" class="error"></p>
-      </div>
+      </form>
     </div>
   </div>
 
@@ -348,8 +375,6 @@ app.get('/', (req, res) => {
     const socket = io();
     const subscribeForm = document.getElementById('subscribe-form');
     const popup = document.getElementById('subscribe-popup');
-    const seedsSection = document.getElementById('seeds-section');
-    const gearSection = document.getElementById('gear-section');
     const itemForm = document.getElementById('item-selection-form');
     const popupEmail = document.getElementById('popup-email');
     const errorMessage = document.getElementById('error-message');
@@ -359,32 +384,30 @@ app.get('/', (req, res) => {
       terminal.scrollTop = terminal.scrollHeight;
     });
 
-    function showGear() {
-      const seedCheckboxes = document.querySelectorAll('input[name="seeds"]:checked');
-      if (seedCheckboxes.length === 0) {
-        errorMessage.textContent = 'Please select at least one seed item.';
-        return;
-      }
-      errorMessage.textContent = '';
-      seedsSection.style.display = 'none';
-      gearSection.style.display = 'block';
-    }
-
-    subscribeForm.onsubmit = function(e) {
+    subscribeForm.onsubmit = async function(e) {
       e.preventDefault();
       const email = subscribeForm.querySelector('input[name="email"]').value.trim();
       if (!email) {
         document.getElementById('subscribe-message').textContent = 'Email cannot be empty.';
         return;
       }
-      popupEmail.value = email;
-      popup.style.display = 'block';
+
+      const response = await fetch('/request-verification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ email })
+      });
+      const result = await response.json();
+      document.getElementById('subscribe-message').textContent = result.message;
+      if (result.success) {
+        popupEmail.value = email;
+        popup.style.display = 'block';
+      }
     };
 
     itemForm.onsubmit = function(e) {
-      const seedCheckboxes = document.querySelectorAll('input[name="seeds"]:checked');
-      const gearCheckboxes = document.querySelectorAll('input[name="gear"]:checked');
-      if (seedCheckboxes.length === 0 && gearCheckboxes.length === 0) {
+      const itemCheckboxes = document.querySelectorAll('input[name="items"]:checked');
+      if (itemCheckboxes.length === 0) {
         e.preventDefault();
         errorMessage.textContent = 'Please select at least one item.';
       }
@@ -395,8 +418,9 @@ app.get('/', (req, res) => {
       document.getElementById('subscribe-message').textContent = 'Successfully subscribed!';
     } else if (urlParams.get('unsubscribed')) {
       document.getElementById('subscribe-message').textContent = 'Successfully unsubscribed!';
-    } else if (urlParams.get('error')) {
-      document.getElementById('subscribe-message').textContent = decodeURIComponent(urlParams.get('error'));
+    } else if (urlParams.get('verified')) {
+      popupEmail.value = urlParams.get('email');
+      popup.style.display = 'block';
     }
   </script>
 </body>
@@ -404,64 +428,53 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.post('/subscribe', (req, res) => {
-  const email = req.body.email ? req.body.email.trim() : '';
+app.post('/request-verification', async (req, res) => {
+  const email = req.body.email?.trim();
   if (!email) {
-    return res.redirect('/?error=' + encodeURIComponent('Email cannot be empty.'));
+    return res.json({ success: false, message: 'Email is required.' });
   }
   if (subscriptions.has(email)) {
-    return res.redirect('/?error=' + encodeURIComponent('Email already subscribed.'));
+    return res.json({ success: false, message: 'Email is already subscribed.' });
+  }
+  sendVerificationEmail(email);
+  res.json({ success: true, message: 'Verification email sent. Please check your inbox.' });
+});
+
+app.get('/verify', (req, res) => {
+  const { email, token } = req.query;
+  const verification = pendingVerifications.get(email);
+
+  if (!verification || verification.token !== token) {
+    return res.send('Invalid or expired verification link.');
   }
 
-  const seeds = Array.isArray(req.body.seeds) ? req.body.seeds : req.body.seeds ? [req.body.seeds] : [];
-  const gear = Array.isArray(req.body.gear) ? req.body.gear : req.body.gear ? [req.body.gear] : [];
+  pendingVerifications.delete(email);
+  res.redirect(`/?verified=true&email=${encodeURIComponent(email)}`);
+});
 
-  if (seeds.length === 0 && gear.length === 0) {
-    return res.redirect('/?error=' + encodeURIComponent('Please select at least one item.'));
+app.post('/subscribe', (req, res) => {
+  const email = req.body.email?.trim();
+  const items = Array.isArray(req.body.items) ? req.body.items : [req.body.items].filter(Boolean);
+
+  if (!email || items.length === 0) {
+    return res.redirect('/?error=Invalid input');
   }
 
-  subscriptions.set(email, {
-    seeds: new Set(seeds),
-    gear: new Set(gear)
-  });
-  broadcastLog(`New subscriber: ${email} with ${seeds.length} seeds and ${gear.length} gear selected`);
+  subscriptions.set(email, new Set(items));
+  broadcastLog(`New subscription: ${email} for ${items.length} items`);
   res.redirect('/?subscribed=true');
 });
 
 app.get('/unsub', (req, res) => {
-  const email = req.query.email;
-  if (!email || !subscriptions.has(email)) {
-    return res.redirect('/?error=' + encodeURIComponent('Email not found in subscription list.'));
+  const email = req.query.email?.trim();
+  if (subscriptions.delete(email)) {
+    broadcastLog(`Unsubscribed: ${email}`);
+    res.redirect('/?unsubscribed=true');
+  } else {
+    res.send('Email not found in subscriptions.');
   }
-  subscriptions.delete(email);
-  broadcastLog(`Unsubscribed: ${email}`);
-  res.redirect('/?unsubscribed=true');
-});
-
-app.get('/test', (req, res) => {
-  if (!latestStockDataObj && !latestWeatherDataObj) {
-    return res.status(404).send('No data available to send.');
-  }
-  if (latestStockDataObj) {
-    subscriptions.forEach((selections, email) => {
-      const html = buildStockHtmlEmail(latestStockDataObj, email);
-      if (html) {
-        sendEmail('🌱 Grow A Garden Stock Updated!', html, email);
-      }
-    });
-  }
-  if (latestWeatherDataObj && latestWeatherDataObj.weather) {
-    const activeEvent = latestWeatherDataObj.weather.find(w => w.active);
-    if (activeEvent) {
-      subscriptions.forEach((_, email) => {
-        sendEmail(`🌦️ Grow A Garden Weather Event: ${activeEvent.weather_name}`, 
-                 buildWeatherHtmlEmail(activeEvent, latestWeatherDataObj.discord_invite, email), email);
-      });
-    }
-  }
-  res.send('Test emails were sent for selected spam items.');
 });
 
 server.listen(PORT, () => {
-  console.log(`HTTP server listening on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
