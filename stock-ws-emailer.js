@@ -2,10 +2,11 @@ const express = require('express');
 const http = require('http');
 const nodemailer = require('nodemailer');
 const { Server } = require('socket.io');
+const { WebSocket } = require('ws');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const crypto = require('crypto');
 
-const stockURL = 'https://api.joshlei.com/v2/growagarden/stock';
+const wsURL = 'wss://websocket.joshlei.com/growagarden?user_id=emailer';
 const weatherURL = 'https://api.joshlei.com/v2/growagarden/weather';
 const itemInfoURL = 'https://api.joshlei.com/v2/growagarden/info/';
 
@@ -28,9 +29,8 @@ let latestWeatherDataJSON = null;
 let latestWeatherDataObj = null;
 let itemInfo = null;
 
-// Store pending verifications and subscriptions
-const pendingVerifications = new Map(); // Map<email, { token: string, timestamp: number }>
-const subscriptions = new Map(); // Map<email, Set<item_id>>
+const pendingVerifications = new Map();
+const subscriptions = new Map();
 
 const app = express();
 const server = http.createServer(app);
@@ -40,7 +40,6 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.urlencoded({ extended: true }));
 
-// Fetch item info on startup
 async function fetchItemInfo() {
   try {
     const response = await fetch(itemInfoURL);
@@ -107,7 +106,6 @@ function buildStockHtmlEmail(data, recipientEmail) {
   let html = `<h2>Grow A Garden Stock Update</h2>`;
   let hasItems = false;
 
-  // Aggregate all stock items from API
   const allStockItems = [];
   ['seed_stock', 'gear_stock', 'egg_stock', 'cosmetic_stock', 'event_stock'].forEach(category => {
     if (Array.isArray(data[category])) {
@@ -115,7 +113,7 @@ function buildStockHtmlEmail(data, recipientEmail) {
     }
   });
 
-  const inStockItems = allStockItems.filter(item => userSelections.has(item.item_id) && item.quantity > 0);
+  const inStockItems = allStockItems.filter(item => userSelections.has(item.item_id) && item. quantity > 0);
 
   if (inStockItems.length > 0) {
     hasItems = true;
@@ -124,15 +122,15 @@ function buildStockHtmlEmail(data, recipientEmail) {
     inStockItems.forEach(item => {
       const name = item.display_name || item.item_id || 'Unknown';
       const qty = item.quantity || 0;
-      const iconUrl = itemInfo.find(info => info.item_id === item.item_id)?.icon || `https://api.joshlei.com/v2/growagarden/image/${item.item_id}`;
-      html += `<tr><td style="border: 1px solid #ddd; padding: 8px; text-align: center;"><img src="${iconUrl}" alt="${name}" style="width: 32px; height: 32px; object-fit: contain;"></td><td style="border: 1px solid #ddd; padding: 8px;">${name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${qty}</td></tr>`;
+      const iconUrl = `https://image.joshlei.com/${item.item_id}.png`;
+      html += `<tr><td style="border: 1px solid #ddd; padding: 8px; text-align: center;">< especies><img src="${iconUrl}" alt="${name}" style="width: 32px; height: 32px; object-fit: contain;"></td><td style="border: 1px solid #ddd; padding: 8px;">${name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${qty}</td></tr>`;
     });
     html += `</tbody></table><br/>`;
   }
 
   if (!hasItems) return null;
 
-  html += `<p>Received update from Grow A Garden API feed.</p>`;
+  html += `<p>Received update from Grow A Garden WebSocket feed.</p>`;
   html += `<p style="font-size: 12px; color: #666;"><a href="https://botemail-yco2.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</a></p>`;
   return html;
 }
@@ -146,7 +144,7 @@ function buildWeatherHtmlEmail(weatherEvent, discordInvite, recipientEmail) {
     html += `<p><strong>Join the Community:</strong> <a href="${discordInvite}">Discord Invite</a></p>`;
   }
   html += `<p>New weather event detected in Grow A Garden!</p>`;
-  html += `<p style="font-size: 12px; color: #666;"><a href="https://botemail-yco2.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</a></p>`;
+  html += `<p style="font-size: 12px; color: #666;"><a href="https://botemail-yco2.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</ 0}`;
   return html;
 }
 
@@ -167,28 +165,45 @@ function sendEmail(subject, htmlBody, recipientEmail) {
   });
 }
 
-async function pollStockAPI() {
-  try {
-    const response = await fetch(stockURL);
-    const data = await response.json();
-    const newDataJSON = JSON.stringify(data);
+function connectWebSocket() {
+  const ws = new WebSocket(wsURL);
+  broadcastLog('Connecting to WebSocket...');
 
-    if (hasDataChanged(latestStockDataJSON, newDataJSON)) {
-      broadcastLog('Stock data changed — checking subscriber selections...');
-      latestStockDataJSON = newDataJSON;
-      latestStockDataObj = data;
-      subscriptions.forEach((selections, email) => {
-        const html = buildStockHtmlEmail(data, email);
-        if (html) {
-          sendEmail('🌱 Grow A Garden Stock Updated!', html, email);
-        }
-      });
-    } else {
-      broadcastLog('Polled Stock API — no changes detected.');
+  ws.on('open', () => {
+    broadcastLog('WebSocket connected');
+  });
+
+  ws.on('message', (data) => {
+    try {
+      const newData = JSON.parse(data);
+      const newDataJSON = JSON.stringify(newData);
+
+      if (hasDataChanged(latestStockDataJSON, newDataJSON)) {
+        broadcastLog('Stock data changed — checking subscriber selections...');
+        latestStockDataJSON = newDataJSON;
+        latestStockDataObj = newData;
+        subscriptions.forEach((selections, email) => {
+          const html = buildStockHtmlEmail(newData, email);
+          if (html) {
+            sendEmail('🌱 Grow A Garden Stock Updated!', html, email);
+          }
+        });
+      } else {
+        broadcastLog('Received WebSocket stock data — no changes detected.');
+      }
+    } catch (err) {
+      broadcastLog(`WebSocket data error: ${err.toString()}`);
     }
-  } catch (err) {
-    broadcastLog(`Error polling Stock API: ${err.toString()}`);
-  }
+  });
+
+  ws.on('error', (err) => {
+    broadcastLog(`WebSocket error: ${err.toString()}`);
+  });
+
+  ws.on('close', () => {
+    broadcastLog('WebSocket closed, attempting to reconnect in 5 seconds...');
+    setTimeout(connectWebSocket, 5000);
+  });
 }
 
 async function pollWeatherAPI() {
@@ -224,22 +239,20 @@ async function pollWeatherAPI() {
   }
 }
 
-setInterval(pollStockAPI, 15000);
+connectWebSocket();
 setInterval(pollWeatherAPI, 15000);
-pollStockAPI();
 pollWeatherAPI();
 
-// Clean up expired verification tokens (older than 24 hours)
 setInterval(() => {
   const now = Date.now();
-  const expirationTime = 24 * 60 * 60 * 1000; // 24 hours
+  const expirationTime = 24 * 60 * 60 * 1000;
   for (const [email, { timestamp }] of pendingVerifications) {
     if (now - timestamp > expirationTime) {
       pendingVerifications.delete(email);
       broadcastLog(`Removed expired verification token for ${email}`);
     }
   }
-}, 60 * 60 * 1000); // Run every hour
+}, 60 * 60 * 1000);
 
 app.get('/', (req, res) => {
   res.send(`
@@ -352,7 +365,7 @@ app.get('/', (req, res) => {
 
   <div id="subscribe-popup" class="popup">
     <div class="popup-content">
-      <h2>Select Items for Stock Alerts</h2>
+      <h2>Item Selection</h2>
       <form id="item-selection-form" action="/subscribe" method="POST">
         <input type="hidden" name="email" id="popup-email">
         <div id="items-section">
@@ -380,7 +393,7 @@ app.get('/', (req, res) => {
     const errorMessage = document.getElementById('error-message');
 
     socket.on('log', msg => {
-      terminal.textContent += msg + '\\n';
+      terminal.textContent += msg + '\n';
       terminal.scrollTop = terminal.scrollHeight;
     });
 
