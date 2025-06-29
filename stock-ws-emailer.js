@@ -69,7 +69,7 @@ function generateVerificationToken() {
 }
 
 function buildVerificationEmail(email, token) {
-  const verificationUrl = `https://botemail-yco2.onrender.com/verify?email=${encodeURIComponent(email)}&token=${token}`;
+  const verificationUrl = `http://botemail-wrdo.onrender.com/verify?email=${encodeURIComponent(email)}&token=${token}`;
   return `
     <h2>Grow A Garden Subscription Verification</h2>
     <p>Please verify your email address to subscribe to Grow A Garden updates.</p>
@@ -133,7 +133,7 @@ function buildStockHtmlEmail(data, recipientEmail) {
   if (!hasItems) return null;
 
   html += `<p>Received update from Grow A Garden API feed.</p>`;
-  html += `<p style="font-size: 12px; color: #666;"><a href="https://botemail-yco2.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</a></p>`;
+  html += `<p style="font-size: 12px; color: #666;"><a href="http://botemail-wrdo.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</a></p>`;
   return html;
 }
 
@@ -146,7 +146,7 @@ function buildWeatherHtmlEmail(weatherEvent, discordInvite, recipientEmail) {
     html += `<p><strong>Join the Community:</strong> <a href="${discordInvite}">Discord Invite</a></p>`;
   }
   html += `<p>New weather event detected in Grow A Garden!</p>`;
-  html += `<p style="font-size: 12px; color: #666;"><a href="https://botemail-yco2.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</a></p>`;
+  html += `<p style="font-size: 12px; color: #666;"><a href="http://botemail-wrdo.onrender.com/unsub?email=${encodeURIComponent(recipientEmail)}">Unsubscribe</a></p>`;
   return html;
 }
 
