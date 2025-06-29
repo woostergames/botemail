@@ -53,10 +53,22 @@ async function fetchItemInfo(attempt = 1, maxAttempts = 5) {
       throw new Error(`HTTP error! Status: ${response.status}, Message: ${errorText}`);
     }
     const data = await response.json();
+    broadcastLog(`Raw item info response: ${JSON.stringify(data).substring(0, 500)}...`);
+    
+    let items = data;
     if (!Array.isArray(data)) {
-      throw new Error('Item info is not an array');
+      if (data.items && Array.isArray(data.items)) {
+        items = data.items;
+        broadcastLog('Extracted item array from "items" property');
+      } else {
+        throw new Error('Item info is not an array or does not contain an "items" array');
+      }
     }
-    itemInfo = data.filter(item => item.item_id && item.display_name);
+    
+    itemInfo = items.filter(item => item.item_id && item.display_name);
+    if (itemInfo.length === 0) {
+      broadcastLog('Warning: Filtered item info resulted in empty array');
+    }
     broadcastLog(`Fetched item info: ${itemInfo.length} items`);
   } catch (err) {
     broadcastLog(`Error fetching item info: ${err.toString()}`);
@@ -96,6 +108,7 @@ function buildVerificationEmail(email, token) {
     <p><a href="${verificationUrl}" style="padding: 10px 20px; background: #6a9955; color: #fff; text-decoration: none; border-radius: 5px;">Verify and Subscribe</a></p>
     <p>If you did not request this, please ignore this email.</p>
     <p style="font-size: 12px; color: #666;">This link will expire in 24 hours.</p>
+    <p style="font-size: 12px; color: #666;">Check your spam/junk folder if you don't see this email.</p>
   `;
 }
 
@@ -115,12 +128,13 @@ function sendVerificationEmail(email) {
     if (error) {
       broadcastLog(`Error sending verification email to ${email}: ${error.toString()}`);
       if (error.code === 'EAUTH') {
-        broadcastLog('Authentication failed. Check EMAIL_USER and EMAIL_PASS, or use an App Password for Gmail.');
+        broadcastLog('Authentication failed. Ensure EMAIL_PASS is a Gmail App Password (Google Account > Security > 2-Step Verification > App Passwords).');
       } else if (error.code === 'EENVELOPE') {
         broadcastLog('Invalid email address or SMTP server issue.');
       }
     } else {
       broadcastLog(`Verification email sent to ${email}: ${info.response}`);
+      broadcastLog(`Please check ${email}'s spam/junk folder if the email doesn't appear in inbox.`);
     }
   });
 
@@ -198,7 +212,7 @@ function sendEmail(subject, htmlBody, recipientEmail) {
     if (error) {
       broadcastLog(`Error sending email to ${recipientEmail}: ${error.toString()}`);
       if (error.code === 'EAUTH') {
-        broadcastLog('Authentication failed. Check EMAIL_USER and EMAIL_PASS, or use an App Password for Gmail.');
+        broadcastLog('Authentication failed. Ensure EMAIL_PASS is a Gmail App Password.');
       }
     } else {
       broadcastLog(`Email sent to ${recipientEmail}: ${info.response}`);
@@ -232,7 +246,7 @@ function connectWebSocket() {
       }
 
       if (hasDataChanged(latestStockDataJSON, newDataJSON)) {
-        broadcastLog(`Stock data changed — checking subscriber selections. Data: ${newDataJSON}`);
+        broadcastLog(`Stock data changed — checking subscriber selections. Data: ${newDataJSON.substring(0, 500)}...`);
         latestStockDataJSON = newDataJSON;
         latestStockDataObj = newData;
         subscriptions.forEach((selections, email) => {
@@ -268,6 +282,7 @@ async function pollWeatherAPI(attempt = 1, maxAttempts = 5) {
       throw new Error(`HTTP error! Status: ${response.status}, Message: ${errorText}`);
     }
     const data = await response.json();
+    broadcastLog(`Raw weather response: ${JSON.stringify(data).substring(0, 500)}...`);
     const newDataJSON = JSON.stringify(data);
 
     if (hasDataChanged(latestWeatherDataJSON, newDataJSON)) {
@@ -618,6 +633,7 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     uptime: process.uptime(),
     itemInfoLoaded: !!itemInfo && itemInfo.length > 0,
+    itemInfoCount: itemInfo ? itemInfo.length : 0,
     subscriptions: subscriptions.size,
     pendingVerifications: pendingVerifications.size
   });
